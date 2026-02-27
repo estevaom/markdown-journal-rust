@@ -1,6 +1,6 @@
-# Journal RAG System (USearch + Tantivy + HTTP Embeddings)
+# Markdown Journal RAG
 
-Local-first journaling tools: semantic search over Markdown journals plus frontmatter analytics, with an incremental indexer and a local embedding service.
+A toolkit for searching and analyzing your Markdown journal entries locally. Combines semantic search, keyword search, and frontmatter analytics -- all running on your machine.
 
 ## Features
 
@@ -9,10 +9,9 @@ Local-first journaling tools: semantic search over Markdown journals plus frontm
 - **Hybrid search** (semantic + keyword fused with RRF)
 - **Incremental indexing** (only new/changed files) with `--rebuild` for full refresh
 - **Frontmatter analytics** (query fields, stats, tag/trigger linting, streak helpers)
-- **Scripted Rust builds**: wrapper scripts auto-build missing release binaries
-- **macOS-safe C++ builds**: setup/wrapper scripts apply SDK libc++ include paths when needed
 - **Local by default**: journal files, embeddings, and indexes stay on your machine
 - **Cross-platform**: macOS, Ubuntu/Debian (including WSL), Arch Linux
+- **Zero config builds**: wrapper scripts auto-build missing Rust binaries (including macOS C++ header fixups)
 
 ## Quick Start
 
@@ -54,13 +53,13 @@ This downloads the embedding model on first run and then serves:
 ./reindex-rag.sh
 
 # Search
-./search-rag.sh "anxiety and sleep patterns" -n 10
-./search-rag.sh "relationship insights" --after 2025-06-01
-./search-rag.sh "debugging professional" --files-only
+./search-rag.sh "project retrospective" -n 10
+./search-rag.sh "learning rust ownership" --after 2025-06-01
+./search-rag.sh "meeting notes" --files-only
 
 # Search modes (default: hybrid)
 ./search-rag.sh "postgres deadlocks" --mode keyword
-./search-rag.sh "what did I learn about ownership?" --mode semantic
+./search-rag.sh "what did I learn this week?" --mode semantic
 
 # Frontmatter query
 ./query-frontmatter.sh --fields mood anxiety weight_kg --format table
@@ -93,13 +92,15 @@ If release binaries are missing, `index-journal.sh`, `search-rag.sh`, and `query
 ./bin/yt-transcript "https://www.youtube.com/watch?v=..." > transcript.txt
 ```
 
-### Weight progress graph
+### Frontmatter graph generator
+
+Generates a progress graph from any numeric frontmatter field. Ships with a `weight_kg` example -- adapt the script to plot mood, sleep, anxiety, or anything else you track.
 
 ```bash
-# One-off graph (writes weight_progress.png at repo root)
+# Generate weight graph (writes weight_progress.png at repo root)
 ./generate-weekly-weight-graph.sh
 
-# Or run directly:
+# Or run the Python script directly for customization:
 cd .tech/code/scripts/weight-analysis
 ./setup_venv.sh
 source .venv/bin/activate
@@ -169,7 +170,7 @@ markdown-journal-rust/
 ├── generate-weekly-weight-graph.sh
 ├── embedding_service/                 # HTTP embedding server (FastAPI)
 ├── template/                         # Journal templates
-├── journal/                           # Example journal content (placeholder data)
+├── journal/                           # Sample journal entries (safe to replace with your own)
 └── .tech/
     ├── code/
     │   ├── scripts/
@@ -189,4 +190,9 @@ markdown-journal-rust/
 
 ## Claude Code Integration
 
-This repo includes optional Claude Code integration in `.claude/` (agents + slash commands). See `CLAUDE.md` for the dev-oriented overview.
+This repo includes optional [Claude Code](https://docs.anthropic.com/en/docs/claude-code) integration in `.claude/`:
+
+- **Slash commands:** `/start` (morning workflow), `/commit` (end-of-day completion + push), `/complete_previous_day` (recover a missed day)
+- **Agents:** daily summary, field completer, RAG search, weekly retro analyzer
+
+These are optional -- the search tools, indexer, and scripts work without Claude Code. See `CLAUDE.md` for details.
