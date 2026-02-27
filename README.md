@@ -1,6 +1,6 @@
 # Journal RAG System (USearch + Tantivy + HTTP Embeddings)
 
-Local-first journaling tools: semantic search over Markdown journals plus frontmatter analytics, with an incremental indexer and an optional GPU-accelerated embedding service.
+Local-first journaling tools: semantic search over Markdown journals plus frontmatter analytics, with an incremental indexer and a local embedding service.
 
 ## Features
 
@@ -9,6 +9,8 @@ Local-first journaling tools: semantic search over Markdown journals plus frontm
 - **Hybrid search** (semantic + keyword fused with RRF)
 - **Incremental indexing** (only new/changed files) with `--rebuild` for full refresh
 - **Frontmatter analytics** (query fields, stats, tag/trigger linting, streak helpers)
+- **Scripted Rust builds**: wrapper scripts auto-build missing release binaries
+- **macOS-safe C++ builds**: setup/wrapper scripts apply SDK libc++ include paths when needed
 - **Local by default**: journal files, embeddings, and indexes stay on your machine
 - **Cross-platform**: macOS, Ubuntu/Debian (including WSL), Arch Linux
 
@@ -66,12 +68,15 @@ This downloads the embedding model on first run and then serves:
 ./query-frontmatter.sh --lint --last-days 30 --format json
 ```
 
+If release binaries are missing, `index-journal.sh`, `search-rag.sh`, and `query-frontmatter.sh` build them automatically before running.
+
 ## Utilities
 
 ### Health-check + quick capture
 
 ```bash
 ./mjr doctor
+./mjr doctor --quick
 ./mjr inbox "Idea: write about that meeting"
 ```
 
@@ -107,11 +112,10 @@ deactivate
 ### Rust tools
 
 ```bash
-cd .tech/code/rust_scripts/rag_search
-cargo build --release
-
-cd ../frontmatter_query
-cargo build --release
+# Uses a cross-platform helper. On macOS, this also applies SDK-backed libc++ includes.
+source bin/rust_build_helpers.sh
+cargo_build_release .tech/code/rust_scripts/rag_search
+cargo_build_release .tech/code/rust_scripts/frontmatter_query
 ```
 
 ### Embedding service
@@ -134,6 +138,8 @@ Run it from repo root:
 ### Embedding service
 
 - `EMBEDDING_SERVICE_URL`: Rust tools connect here (default: `http://127.0.0.1:8000`)
+- `EMBEDDING_SERVICE_HOST`: embedding service bind host for `start-server.sh` (default: `127.0.0.1`)
+- `EMBEDDING_SERVICE_PORT`: embedding service bind port for `start-server.sh` (default: `8000`)
 - `EMBEDDING_MODEL`: sentence-transformers model name (default: `BAAI/bge-large-en-v1.5`)
 - `EMBEDDING_DEVICE`: `cuda`, `mps`, or `cpu` (default: auto-detect)
 
@@ -149,6 +155,7 @@ markdown-journal-rust/
 ├── CLAUDE.md
 ├── mjr
 ├── bin/
+│   ├── rust_build_helpers.sh
 │   └── yt-transcript
 ├── setup_mac_environment.sh
 ├── setup_ubuntu_environment.sh
