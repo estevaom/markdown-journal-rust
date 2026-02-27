@@ -1,98 +1,58 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Script to set up Rust tools on Arch Linux
+# Setup script for Arch Linux
 
-# Function to print messages
 print_message() {
   echo "----------------------------------------------------"
   echo "$1"
   echo "----------------------------------------------------"
 }
 
-# --- 1. System Dependencies ---
-print_message "Checking and installing system dependencies..."
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
 
-# Check for yay (AUR helper), install if not present
-if ! command -v yay &> /dev/null; then
-    echo "yay (AUR helper) not found. Attempting to install..."
-    sudo pacman -S --needed --noconfirm git base-devel
-    git clone https://aur.archlinux.org/yay.git /tmp/yay
-    (cd /tmp/yay && makepkg -si --noconfirm)
-    rm -rf /tmp/yay
-    if ! command -v yay &> /dev/null; then
-        echo "Failed to install yay. Please install it manually and re-run the script."
-        exit 1
-    fi
-fi
+print_message "Installing system dependencies..."
 
-# Install protobuf (for LanceDB)
-sudo pacman -S --needed --noconfirm protobuf
+# Ensure basic build toolchain is present (includes gcc/clang toolchain)
+sudo pacman -S --needed --noconfirm git base-devel python python-pip
 
-# --- 2. Rust Installation ---
-print_message "Checking and installing Rust via rustup..."
-if ! command -v rustc &> /dev/null; then
-  echo "Rust not found. Installing via rustup..."
+print_message "Installing Rust via rustup (if needed)..."
+if ! command -v rustc >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  # shellcheck disable=SC1091
   source "$HOME/.cargo/env"
-  echo "Rust installed successfully!"
-  rustc --version
-  cargo --version
-else
-  echo "Rust is already installed:"
-  rustc --version
-  cargo --version
 fi
 
-# --- 3. Build Rust Tools ---
+print_message "Setting up embedding service (Python venv)..."
+if [ -d "embedding_service" ]; then
+  python -m venv embedding_service/.venv
+  # shellcheck disable=SC1091
+  source embedding_service/.venv/bin/activate
+  pip install -U pip
+  pip install -r embedding_service/requirements.txt
+  deactivate
+else
+  echo "WARNING: embedding_service/ not found. Index/search will not work without embeddings."
+fi
+
 print_message "Building Rust CLI tools..."
 
-# Build frontmatter query tool
-FRONTMATTER_DIR=".tech/code/rust_scripts/frontmatter_query"
-if [ -d "$FRONTMATTER_DIR" ]; then
-  echo "Building frontmatter query tool..."
-  (cd "$FRONTMATTER_DIR" && cargo build --release)
-  if [ $? -eq 0 ]; then
-    echo "✅ Frontmatter query tool built successfully"
-  else
-    echo "❌ Failed to build frontmatter query tool"
-  fi
-else
-  echo "WARNING: $FRONTMATTER_DIR not found"
+if [ -d ".tech/code/rust_scripts/frontmatter_query" ]; then
+  (cd .tech/code/rust_scripts/frontmatter_query && cargo build --release)
 fi
 
-# Build RAG search tools
-RAG_DIR=".tech/code/rust_scripts/rag_search"
-if [ -d "$RAG_DIR" ]; then
-  echo "Building RAG search tools..."
-  echo "Note: First build will download embedding models (~400MB)"
-  (cd "$RAG_DIR" && cargo build --release)
-  if [ $? -eq 0 ]; then
-    echo "✅ RAG search tools built successfully"
-    echo "   - rag-index: For indexing journal entries"
-    echo "   - rag-search: For semantic search"
-  else
-    echo "❌ Failed to build RAG search tools"
-  fi
-else
-  echo "WARNING: $RAG_DIR not found"
+if [ -d ".tech/code/rust_scripts/rag_search" ]; then
+  (cd .tech/code/rust_scripts/rag_search && cargo build --release)
 fi
 
-# --- 4. Create convenience scripts ---
-print_message "Creating convenience scripts..."
+print_message "Ensuring helper scripts are executable..."
+chmod +x mjr search-rag.sh query-frontmatter.sh index-journal.sh reindex-rag.sh start-server.sh stop-server.sh generate-weekly-weight-graph.sh bin/yt-transcript .tech/code/scripts/weight-analysis/setup_venv.sh 2>/dev/null || true
 
-# Ensure scripts are executable
-chmod +x search-rag.sh 2>/dev/null || true
-chmod +x query-frontmatter.sh 2>/dev/null || true
-chmod +x reindex-rag.sh 2>/dev/null || true
-
-# --- 5. Initial Index ---
 print_message "Setup complete!"
 echo ""
-echo "To get started:"
-echo "1. Add your journal entries to the 'journal/' directory"
-echo "2. Run './reindex-rag.sh' to build the search index"
-echo "3. Use './search-rag.sh \"your query\"' to search"
-echo "4. Use './query-frontmatter.sh --fields mood anxiety' to analyze metadata"
-echo ""
-echo "First indexing will download embedding models (~400MB) to .fastembed_cache/"
-echo "This is a one-time download that will be cached for future use."
+echo "Next steps:"
+echo "1) Start embeddings: ./start-server.sh"
+echo "2) Index journal:    ./index-journal.sh"
+echo "3) Search:           ./search-rag.sh \"your query\""
+echo "4) Frontmatter:      ./query-frontmatter.sh --fields mood anxiety --format table"

@@ -16,15 +16,8 @@ chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2.5"
 anyhow = "1.0"
 gray_matter = "0.2"
-lancedb = "0.21.1"
 tokio = { version = "1", features = ["full"] }
-rand = "0.8"  # For temporary fake embeddings
-arrow = { version = "55.2", features = ["test_utils"] }
-futures = "0.3"
-fastembed = "5.0"
-
-# For embeddings (add later)
-# fastembed = "3"
-# candle-core = { version = "0.3", features = ["cuda"] }
-# candle-nn = "0.3"
-# candle-transformers = "0.3"
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+usearch = "2.16"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tantivy = "0.22"

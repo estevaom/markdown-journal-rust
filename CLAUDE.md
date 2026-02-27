@@ -4,123 +4,84 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Journal RAG System - a privacy-focused journal application with AI-powered semantic search and metadata analysis capabilities. The system uses local embeddings and vector databases to enable natural language queries over personal journal entries while keeping all data on the local machine.
+This repository is a local-first Journal RAG system:
+- A Rust indexer (`rag-index`) that chunks Markdown files and stores vectors in a USearch index plus metadata in SQLite
+- A Rust search CLI (`rag-search`) for semantic/keyword/hybrid search (date filters, JSON output, and `--files-only`)
+- A Rust frontmatter analytics CLI (`frontmatter-query`)
+- A local HTTP embedding service (`embedding_service/`) used by both index and search
 
 ## Architecture
 
-### Core Components (Rust Implementation)
+### 1) Embedding Service (Python)
 
-1. **RAG Search Tools** (`.tech/code/rust_scripts/rag_search/`)
-   - `rag-index`: Indexes journal entries into LanceDB with BGE embeddings
-   - `rag-search`: Semantic search over indexed journal content
-   - Uses fastembed for efficient vector generation
-   - LanceDB for vector storage (replacing ChromaDB)
+- Location: `embedding_service/`
+- Exposes: `POST /embed`, `GET /health`, `GET /info`
+- Config:
+  - `EMBEDDING_MODEL` (default: `BAAI/bge-large-en-v1.5`)
+  - `EMBEDDING_DEVICE` (`cuda|mps|cpu`, default auto)
 
-2. **Frontmatter Query Tool** (`.tech/code/rust_scripts/frontmatter_query/`)
-   - Analyzes YAML frontmatter in journal entries
-   - Supports statistical analysis and multiple output formats
-   - Efficient metadata extraction and aggregation
+### 2) RAG Search Tools (Rust)
 
-3. **Helper Scripts** (root directory)
-   - `reindex-rag.sh`: Rebuilds the entire search index
-   - `search-rag.sh`: Convenient wrapper for semantic search
-   - `query-frontmatter.sh`: Convenient wrapper for metadata queries
+- Workspace: `.tech/code/rust_scripts/rag_search/`
+- Binaries:
+  - `rag-index`: incremental by default, `--rebuild` for full rebuild
+  - `rag-search`: `--mode semantic|keyword|hybrid` (hybrid fuses USearch + BM25 via RRF)
+- Data:
+  - `.tech/data/usearch/journal_vectors.usearch`
+  - `.tech/data/usearch/journal_metadata.db`
+  - `.tech/data/usearch/keyword.tantivy/`
 
-### Data Storage
-- Journal entries: `journal/` directory with YYYY/MM/DD.md structure
-- Vector database: `.tech/data/lancedb/` (auto-created on first index)
-- Embeddings: Generated using BGE-base-en-v1.5 model via fastembed
+Important: USearch does not currently have a stable vector delete API. When files are modified/deleted, metadata rows are removed and results are ignored, but the vector index is append-only. Use `--rebuild` occasionally to compact.
+
+### 3) Frontmatter Query Tool (Rust)
+
+- Location: `.tech/code/rust_scripts/frontmatter_query/`
+- Supports:
+  - Field extraction, stats, JSON/CSV/table output
+  - `--last-days`, tag/trigger filters, tag/trigger listing, linting
+  - Helpers like `--last-rest-day` and `--streak`
 
 ## Development Commands
 
-### Building the Rust Tools
+### Build
 
 ```bash
-# Build all tools (from project root)
-cd .tech/code/rust_scripts/rag_search && cargo build --release
-cd ../frontmatter_query && cargo build --release
+# RAG tools
+cd .tech/code/rust_scripts/rag_search
+cargo build --release
 
-# Or build individually
-cargo build --release --manifest-path .tech/code/rust_scripts/rag_search/Cargo.toml
-cargo build --release --manifest-path .tech/code/rust_scripts/frontmatter_query/Cargo.toml
+# Frontmatter tool
+cd ../frontmatter_query
+cargo build --release
 ```
 
-### Using the Tools
+### Run (repo root)
 
 ```bash
-# Reindex all journal entries (required after adding new entries)
+# Start local embedding service
+./start-server.sh
+
+# Quick health-check / capture
+./mjr doctor
+./mjr inbox "idea to capture"
+
+# Incremental index
+./index-journal.sh
+
+# Full rebuild
 ./reindex-rag.sh
 
-# Search journal
-./search-rag.sh "anxiety and sleep"
-./search-rag.sh "productivity" --num-results 5
-./search-rag.sh "meditation" --after 2025-01-01 --before 2025-12-31
+# Search
+./search-rag.sh "your query" -n 10
+./search-rag.sh "your query" --after 2025-01-01 --before 2025-12-31 --format json
+./search-rag.sh "exact identifier" --mode keyword
 
-# Query frontmatter
-./query-frontmatter.sh --fields mood anxiety weight_kg
-./query-frontmatter.sh --fields mood --stats
-./query-frontmatter.sh --fields mood anxiety --format csv > data.csv
+# Frontmatter
+./query-frontmatter.sh --fields mood anxiety weight_kg --format table
+./query-frontmatter.sh --lint --last-days 30 --format json
 ```
 
-### Direct Binary Usage
+## Troubleshooting
 
-```bash
-# Index with options
-.tech/code/rust_scripts/rag_search/target/release/rag-index \
-  --journal-dir journal \
-  --lance-dir .tech/data/lancedb \
-  --rebuild  # Force full rebuild
-
-# Search with all options
-.tech/code/rust_scripts/rag_search/target/release/rag-search "query" \
-  --num-results 10 \
-  --after 2025-01-01 \
-  --before 2025-12-31 \
-  --format json \
-  --files-only \
-  --debug
-
-# Frontmatter query with all options
-.tech/code/rust_scripts/frontmatter_query/target/release/frontmatter-query \
-  --path journal \
-  --fields mood anxiety weight_kg \
-  --start-date 2025-01-01 \
-  --end-date 2025-12-31 \
-  --stats \
-  --format table \
-  --include-files
-```
-
-## Key Implementation Details
-
-### Rust Architecture
-- Workspace structure with separate crates for indexing and searching
-- Shared dependencies managed through workspace Cargo.toml
-- Async/await patterns using tokio runtime
-- Error handling with anyhow and proper Result types
-
-### Journal File Structure
-- Files located in `journal/` directory
-- Expected path pattern: `journal/YYYY/MM/DD.md` or `journal/topics/*.md`
-- Optional YAML frontmatter for metadata tracking
-- Template noise automatically filtered during indexing
-
-### Vector Database (LanceDB)
-- Columnar storage format optimized for vector similarity search
-- Automatic creation on first index
-- BGE-base-en-v1.5 embeddings (768 dimensions)
-- Efficient nearest neighbor search with cosine similarity
-
-### Performance Characteristics
-- Indexing: Slower than GPU-accelerated Python (but higher quality embeddings)
-- Search: <20ms response times (blazing fast)
-- Search quality: Superior relevance compared to Python implementation
-- Binary sizes: ~190MB (includes embedded model weights)
-
-## Important Notes
-
-- First run will download embedding models (~400MB) to `.fastembed_cache/`
-- LanceDB files are stored in `.tech/data/lancedb/` (excluded from git)
-- Search operations are extremely fast (<20ms) with better relevance
-- All processing happens locally - no external API calls
-- Template boilerplate is automatically removed during indexing
+- If Rust tools can’t connect: ensure `./start-server.sh` is running and `EMBEDDING_SERVICE_URL` matches.
+- First run is slower: the embedding model downloads on first service startup.

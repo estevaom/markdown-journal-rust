@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./mjr doctor [--quick]
+  ./mjr inbox "message"
+  echo "message" | ./mjr inbox
+
+Commands:
+  doctor     Check local system health (embedding service, binaries, indexes, lint, git).
+  inbox      Append a timestamped bullet to today's "Inbox" section (creates today's file if missing).
+
+Options:
+  --quick    Skip slower checks (frontmatter lint + git status).
+EOF
+}
+
+color_init() {
+  if [ -t 1 ] && [ "${TERM:-}" != "dumb" ]; then
+    C_OK=$'\033[0;32m'
+    C_WARN=$'\033[1;33m'
+    C_FAIL=$'\033[0;31m'
+    C_DIM=$'\033[0;90m'
+    C_RESET=$'\033[0m'
+  else
+    C_OK=""
+    C_WARN=""
+    C_FAIL=""
+    C_DIM=""
+    C_RESET=""
+  fi
+}
+
+report_ok() { printf "%sOK%s    %s\n" "${C_OK}" "${C_RESET}" "$1"; }
+report_warn() { printf "%sWARN%s  %s\n" "${C_WARN}" "${C_RESET}" "$1"; }
+report_fail() { printf "%sFAIL%s  %s\n" "${C_FAIL}" "${C_RESET}" "$1"; }
+report_fix() { printf "      %sFix:%s %s\n" "${C_DIM}" "${C_RESET}" "$1"; }
+
+mtime_epoch() {
+  local path="$1"
+  if stat -c %Y "$path" >/dev/null 2>&1; then
+    stat -c %Y "$path"
+    return 0
+  fi
+  stat -f %m "$path"
+}
+
+age_days() {
+  local path="$1"
+  local now epoch
+  now="$(date +%s)"
+  epoch="$(mtime_epoch "$path")"
+  echo $(((now - epoch) / 86400))
+}
+
+doctor() {
+  local quick="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --quick)
+      quick="true"
+      shift
+      ;;
+    -h | --help)
+      usage
+      return 0
+      ;;
+    *)
+      printf "Unknown option: %s\n\n" "$1" >&2
+      usage >&2
+      return 2
+      ;;
+    esac
+  done
+
+  color_init
+
+  local failures=0
+
+  # ---- Embedding service ----
+  local embed_url="${EMBEDDING_SERVICE_URL:-http://127.0.0.1:8000}"
+  if command -v curl >/dev/null 2>&1; then
+    local health_out=""
+    if health_out="$(curl -fsS --max-time 2 "$embed_url/health" 2>/dev/null)"; then
+      if echo "$health_out" | grep -Eq '"model_loaded"\s*:\s*true'; then
+        report_ok "Embedding service reachable ($embed_url) and model loaded"
+      else
+        report_warn "Embedding service reachable ($embed_url) but model not loaded yet"
+        report_fix "./start-server.sh  (and wait for model load to finish)"
+      fi
+    else
+      report_warn "Embedding service not reachable at $embed_url"
+      report_fix "./start-server.sh"
+    fi
+  else
+    report_warn "curl not found; cannot health-check embedding service"
+    report_fix "Install curl (or skip this check)"
+  fi
+
+  # ---- Python venv ----
+  if [ -d "embedding_service" ]; then
+    if [ -f "embedding_service/.venv/bin/activate" ] || [ -f "embedding_service/venv/bin/activate" ]; then
+      report_ok "Embedding service venv present (embedding_service/.venv or embedding_service/venv)"
+    else
+      report_fail "Embedding service venv missing (embedding_service/.venv or embedding_service/venv)"
+      report_fix "Run a setup script (recommended): ./setup_ubuntu_environment.sh (or macOS/Arch variants)"
+      failures=$((failures + 1))
+    fi
+  else
+    report_warn "embedding_service/ directory not found"
+    report_fix "Ensure you are running ./mjr from the repo root"
+  fi
+
+  # ---- Rust binaries ----
+  local rag_dir=".tech/code/rust_scripts/rag_search"
+  local fm_dir=".tech/code/rust_scripts/frontmatter_query"
+  local rag_search_bin="$rag_dir/target/release/rag-search"
+  local rag_index_bin="$rag_dir/target/release/rag-index"
+  local fm_bin="$fm_dir/target/release/frontmatter-query"
+
+  if [ -f "$rag_search_bin" ]; then
+    report_ok "RAG search binary present ($rag_search_bin)"
+  else
+    report_fail "RAG search binary missing ($rag_search_bin)"
+    if command -v cargo >/dev/null 2>&1; then
+      report_fix "(cd $rag_dir && cargo build --release --bin rag-search)"
+    else
+      report_fix "Install Rust (cargo), then: (cd $rag_dir && cargo build --release --bin rag-search)"
+    fi
+    failures=$((failures + 1))
+  fi
+
+  if [ -f "$rag_index_bin" ]; then
+    report_ok "RAG indexer binary present ($rag_index_bin)"
+  else
+    report_fail "RAG indexer binary missing ($rag_index_bin)"
+    if command -v cargo >/dev/null 2>&1; then
+      report_fix "(cd $rag_dir && cargo build --release --bin rag-index)"
+    else
+      report_fix "Install Rust (cargo), then: (cd $rag_dir && cargo build --release --bin rag-index)"
+    fi
+    failures=$((failures + 1))
+  fi
+
+  if [ -f "$fm_bin" ]; then
+    report_ok "Frontmatter query binary present ($fm_bin)"
+  else
+    report_warn "Frontmatter query binary missing ($fm_bin)"
+    if command -v cargo >/dev/null 2>&1; then
+      report_fix "(cd $fm_dir && cargo build --release --bin frontmatter-query)"
+    else
+      report_fix "Install Rust (cargo), then: (cd $fm_dir && cargo build --release --bin frontmatter-query)"
+    fi
+  fi
+
+  # ---- Indices ----
+  local data_dir=".tech/data/usearch"
+  local vectors="$data_dir/journal_vectors.usearch"
+  local meta="$data_dir/journal_metadata.db"
+  local kw="$data_dir/keyword.tantivy"
+
+  if [ -s "$vectors" ] && [ -s "$meta" ]; then
+    local d
+    d="$(age_days "$vectors")"
+    if [ "$d" -le 7 ]; then
+      report_ok "RAG indices present ($data_dir) (updated ~${d}d ago)"
+    else
+      report_warn "RAG indices present but look stale ($data_dir) (updated ~${d}d ago)"
+      report_fix "./index-journal.sh  (or full rebuild: ./reindex-rag.sh)"
+    fi
+  else
+    report_fail "RAG indices missing (expected $vectors and $meta)"
+    report_fix "./reindex-rag.sh"
+    failures=$((failures + 1))
+  fi
+
+  if [ -d "$kw" ]; then
+    report_ok "Keyword (BM25) index present ($kw)"
+  else
+    report_warn "Keyword (BM25) index missing ($kw)"
+    report_fix "./index-journal.sh  (will build keyword index alongside vectors)"
+  fi
+
+  # ---- Frontmatter lint (optional) ----
+  if [ "$quick" != "true" ]; then
+    if [ -x "./query-frontmatter.sh" ]; then
+      local lint_out=""
+      if lint_out="$(./query-frontmatter.sh --lint --format json 2>/dev/null)"; then
+        local compact
+        compact="$(printf "%s" "$lint_out" | tr -d ' \t\r\n')"
+        if [ "$compact" = "[]" ]; then
+          report_ok "Frontmatter lint clean"
+        else
+          report_warn "Frontmatter lint found issues"
+          report_fix "./query-frontmatter.sh --lint --format table"
+        fi
+      else
+        report_warn "Frontmatter lint check failed (could not run query-frontmatter.sh)"
+        report_fix "./query-frontmatter.sh --help"
+      fi
+    else
+      report_warn "query-frontmatter.sh not executable; skipping lint check"
+      report_fix "chmod +x query-frontmatter.sh"
+    fi
+  fi
+
+  # ---- Git status ----
+  if [ "$quick" != "true" ]; then
+    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      if [ -z "$(git status --porcelain)" ]; then
+        report_ok "Git status clean"
+      else
+        report_warn "Git status dirty"
+        report_fix "git status"
+      fi
+    else
+      report_warn "git not found (or not a git repo); skipping git check"
+    fi
+  fi
+
+  if [ "$failures" -eq 0 ]; then
+    return 0
+  fi
+  return 1
+}
+
+inbox() {
+  local msg=""
+  if [ $# -gt 0 ]; then
+    msg="$*"
+  elif [ ! -t 0 ]; then
+    msg="$(cat)"
+  fi
+
+  msg="$(printf "%s" "$msg" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  if [ "$msg" = "" ]; then
+    printf "Missing message.\n\n" >&2
+    usage >&2
+    return 2
+  fi
+
+  local today y m d t
+  today="$(date +%Y-%m-%d)"
+  y="$(date +%Y)"
+  m="$(date +%m)"
+  d="$(date +%d)"
+  t="$(date +%H:%M)"
+
+  local dir file
+  dir="journal/$y/$m"
+  file="$dir/$d.md"
+
+  mkdir -p "$dir"
+
+  if [ ! -f "$file" ]; then
+    if [ ! -f "template/daily.md" ]; then
+      printf "template/daily.md not found; cannot create today's file.\n" >&2
+      return 1
+    fi
+    sed "s/YYYY-MM-DD/$today/g" template/daily.md >"$file"
+  fi
+
+  local bullet
+  bullet="- ${t}: ${msg}"
+
+  if grep -q "^## Inbox[[:space:]]*$" "$file"; then
+    local tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/mjr_inbox.XXXXXX")"
+    awk -v bullet="$bullet" '
+      BEGIN { in_inbox = 0; inserted = 0 }
+      {
+        if ($0 ~ /^## Inbox[[:space:]]*$/) {
+          print
+          in_inbox = 1
+          next
+        }
+        if (in_inbox == 1 && inserted == 0) {
+          if ($0 ~ /^## /) {
+            print bullet
+            print ""
+            inserted = 1
+            in_inbox = 0
+            print
+            next
+          }
+        }
+        print
+      }
+      END {
+        if (in_inbox == 1 && inserted == 0) {
+          print bullet
+        }
+      }
+    ' "$file" >"$tmp"
+    mv "$tmp" "$file"
+  else
+    printf "\n## Inbox\n\n%s\n" "$bullet" >>"$file"
+  fi
+
+  echo "Captured to $file"
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+doctor)
+  doctor "$@"
+  ;;
+inbox)
+  inbox "$@"
+  ;;
+-h | --help | help)
+  usage
+  ;;
+*)
+  printf "Unknown command: %s\n\n" "$cmd" >&2
+  usage >&2
+  exit 2
+  ;;
+esac
+

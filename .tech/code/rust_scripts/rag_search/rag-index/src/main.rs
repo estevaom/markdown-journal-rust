@@ -1,15 +1,8 @@
 use anyhow::Result;
 use chrono::NaiveDate;
 use clap::Parser;
-use gray_matter::Matter;
 use gray_matter::engine::YAML;
-use lancedb;
-use arrow::array::{Int32Array, StringArray, FixedSizeListArray, Array};
-use arrow::datatypes::{DataType, Field, Schema, Float32Type};
-use arrow::record_batch::RecordBatch;
-use arrow::record_batch::RecordBatchIterator;
-use std::sync::Arc;
-// use rand::Rng; // No longer needed for fake embeddings
+use gray_matter::Matter;
 use serde::Deserialize;
 use std::fs;
 use std::io::Write;
@@ -18,19 +11,26 @@ use walkdir::WalkDir;
 
 mod template_filter;
 use template_filter::TemplateFilter;
-mod embeddings;
-use embeddings::EmbeddingGenerator;
+
+mod embeddings_http;
+use embeddings_http::EmbeddingGenerator;
+
+mod keyword_tantivy;
+use keyword_tantivy::KeywordIndex;
+
+mod usearch_store;
+use usearch_store::{ChunkMetadata, USearchStore};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Index journal files for RAG search", long_about = None)]
+#[command(author, version, about = "Index journal files for RAG search (USearch + SQLite)", long_about = None)]
 struct Args {
     /// Journal directory to index
     #[arg(short, long, default_value = "journal")]
     journal_dir: PathBuf,
 
-    /// LanceDB directory
-    #[arg(short, long, default_value = ".tech/data/lancedb")]
-    lance_dir: PathBuf,
+    /// Data directory for USearch + SQLite metadata
+    #[arg(short = 'd', long, default_value = ".tech/data/usearch")]
+    data_dir: PathBuf,
 
     /// Force rebuild entire index
     #[arg(short, long)]
@@ -50,221 +50,286 @@ struct Frontmatter {
     date: String,
 }
 
-// Document struct is now only used for intermediate processing
-
-// const EMBEDDING_DIM: usize = 384; // Now determined by the model
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    
-    println!("🔍 RAG Indexer");
+
+    println!("🔍 RAG Indexer (USearch)");
     println!("📁 Scanning: {}", args.journal_dir.display());
-    println!("💾 Index location: {}", args.lance_dir.display());
-    
-    // Scan documents
+    println!("💾 Index location: {}", args.data_dir.display());
+
+    fs::create_dir_all(&args.data_dir)?;
+
     let documents = scan_journal_directory(&args.journal_dir, args.since.as_deref(), args.verbose)?;
-    println!("\n📊 Found {} documents to index", documents.len());
-    
+    println!("\n📊 Found {} documents", documents.len());
+
     if documents.is_empty() {
         println!("No documents to index!");
         return Ok(());
     }
-    
-    // Create or open LanceDB connection
-    let lance_path = args.lance_dir.join("journal.lance");
-    fs::create_dir_all(&args.lance_dir)?;
-    
-    let db = lancedb::connect(lance_path.to_str().unwrap())
-        .execute()
-        .await?;
-    println!("📂 Connected to LanceDB at: {}", lance_path.display());
-    
-    // Create template filter
+
     let filter = TemplateFilter::new();
-    
-    // Create embedding generator
+
     let embedding_generator = EmbeddingGenerator::new()?;
     let embedding_dim = embedding_generator.embedding_dimension();
-    
-    // Create schema for our documents with chunk support
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("path", DataType::Utf8, false),
-        Field::new("date", DataType::Int32, false),
-        Field::new("content", DataType::Utf8, false),
-        Field::new("chunk_index", DataType::Int32, false),  // Which chunk in document
-        Field::new("total_chunks", DataType::Int32, false), // Total chunks in document
-        Field::new(
-            "embedding",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                embedding_dim as i32,
-            ),
-            false,
-        ),
-    ]));
-    
-    // Prepare documents with embeddings
-    println!("\n🧽 Cleaning template noise and chunking documents...");
-    println!("🤖 Generating real embeddings with BGE-base-en-v1.5...");
-    
-    // Process documents into chunks
-    let mut all_chunks = Vec::new();
-    let mut chunk_paths = Vec::new();
-    let mut chunk_dates = Vec::new();
-    let mut chunk_indices = Vec::new();
-    let mut total_chunks_vec = Vec::new();
-    
-    for doc in &documents {
-        // Extract chunks for this document
-        let chunks = filter.extract_chunks(&doc.content, 2000); // 2000 char max per chunk
-        let num_chunks = chunks.len() as i32;
-        
-        // Add each chunk with metadata
-        for (idx, chunk_content) in chunks.into_iter().enumerate() {
-            all_chunks.push(chunk_content);
-            chunk_paths.push(doc.path.clone());
-            chunk_dates.push(doc.date);
-            chunk_indices.push(idx as i32);
-            total_chunks_vec.push(num_chunks);
+    println!("  Embedding dimension: {}", embedding_dim);
+
+    let index_path = args.data_dir.join("journal_vectors.usearch");
+    let metadata_path = args.data_dir.join("journal_metadata.db");
+    let keyword_dir = args.data_dir.join("keyword.tantivy");
+
+    let full_rebuild = args.rebuild || !index_path.exists() || !metadata_path.exists();
+
+    let mut store = if full_rebuild {
+        if index_path.exists() {
+            println!("🗑️  Removing existing index...");
+            fs::remove_file(&index_path)?;
+        }
+        if metadata_path.exists() {
+            fs::remove_file(&metadata_path)?;
+        }
+        println!("🆕 Creating new index...");
+        USearchStore::new(&index_path, &metadata_path, embedding_dim)?
+    } else {
+        println!("📂 Loading existing index...");
+        USearchStore::load(&index_path, &metadata_path, embedding_dim)?
+    };
+
+    let (mut keyword_index, keyword_created) = if full_rebuild {
+        (KeywordIndex::create_fresh(&keyword_dir)?, true)
+    } else {
+        KeywordIndex::open_or_create(&keyword_dir)?
+    };
+
+    let mut next_id: u64 = if full_rebuild { 0 } else { store.get_max_chunk_id()? + 1 };
+
+    if args.verbose && next_id > 0 {
+        println!("  Starting chunk IDs from: {}", next_id);
+    }
+
+    let (docs_to_process, skipped_count) = if full_rebuild {
+        (documents.clone(), 0)
+    } else {
+        filter_documents_for_indexing(&mut store, &documents, args.verbose)?
+    };
+
+    let deleted_paths = if full_rebuild {
+        Vec::new()
+    } else {
+        cleanup_deleted_files(&mut store, &documents, args.verbose)?
+    };
+    let deleted_count = deleted_paths.len();
+
+    // If we created a fresh keyword index on an existing vector index, bootstrap it from the
+    // existing chunks in SQLite so keyword/hybrid search works immediately (no full re-embed).
+    if keyword_created && !full_rebuild {
+        bootstrap_keyword_index_from_metadata(&mut keyword_index, &store, args.verbose)?;
+    }
+
+    // Keep keyword index in sync with deletions/modifications before we add new chunks.
+    if !full_rebuild {
+        for doc in &docs_to_process {
+            keyword_index.delete_path(&doc.path);
+        }
+        for deleted_path in &deleted_paths {
+            keyword_index.delete_path(deleted_path);
         }
     }
-    
-    println!("  Extracted {} chunks from {} documents", all_chunks.len(), documents.len());
-    
-    // Generate embeddings in batches to avoid timeouts
+
+    println!(
+        "\n📊 Processing {} documents ({} unchanged, {} deleted)",
+        docs_to_process.len(),
+        skipped_count,
+        deleted_count
+    );
+
+    if docs_to_process.is_empty() && deleted_count == 0 && !full_rebuild {
+        if keyword_created {
+            println!("💾 Committing keyword index...");
+            keyword_index.commit()?;
+            println!("✨ Keyword index bootstrapped (no vector changes).");
+        } else {
+            println!("✨ No new or modified documents to index!");
+        }
+        return Ok(());
+    }
+
+    println!("\n🧽 Cleaning template noise and chunking documents...");
+    println!("🤖 Generating embeddings via embedding service...");
+
+    let mut all_chunks = Vec::new();
+    let mut chunk_metadata_list = Vec::new();
+
+    for doc in &docs_to_process {
+        let chunks = filter.extract_chunks(&doc.content, 2000);
+        let num_chunks = chunks.len() as i32;
+
+        for (idx, chunk_content) in chunks.into_iter().enumerate() {
+            let metadata = ChunkMetadata {
+                id: next_id,
+                path: doc.path.clone(),
+                date: doc.date,
+                content: chunk_content.clone(),
+                chunk_index: idx as i32,
+                total_chunks: num_chunks,
+            };
+
+            all_chunks.push(chunk_content);
+            chunk_metadata_list.push(metadata);
+            next_id += 1;
+        }
+    }
+
+    println!(
+        "  Extracted {} chunks from {} documents",
+        all_chunks.len(),
+        docs_to_process.len()
+    );
+
     let mut embeddings = Vec::new();
     let batch_size = 100;
-    
+
     for (i, chunk_batch) in all_chunks.chunks(batch_size).enumerate() {
-        print!("  Generating embeddings batch {}/{}...\r", i + 1, (all_chunks.len() + batch_size - 1) / batch_size);
+        print!(
+            "  Generating embeddings batch {}/{}...\r",
+            i + 1,
+            (all_chunks.len() + batch_size - 1) / batch_size
+        );
         std::io::stdout().flush()?;
-        
-        let batch_embeddings = embedding_generator.generate_embeddings(chunk_batch.to_vec())?;
+
+        let batch_embeddings = embedding_generator.generate_embeddings(
+            chunk_batch.iter().map(|s| s.to_string()).collect(),
+        )?;
         embeddings.extend(batch_embeddings);
     }
-    
-    println!("\n✅ Generated {} embeddings of dimension {}", embeddings.len(), embedding_dim);
-    
-    // Create Arrow arrays
-    let path_array = Arc::new(StringArray::from(chunk_paths));
-    let date_array = Arc::new(Int32Array::from(chunk_dates));
-    let content_array = Arc::new(StringArray::from(all_chunks));
-    let chunk_index_array = Arc::new(Int32Array::from(chunk_indices));
-    let total_chunks_array = Arc::new(Int32Array::from(total_chunks_vec));
-    let embedding_array = Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        embeddings.into_iter().map(|v| Some(v.into_iter().map(Some).collect::<Vec<_>>())),
-        embedding_dim as i32,
-    ));
-    
-    // Create RecordBatch - need to ensure all arrays are the same type
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            path_array as Arc<dyn Array>,
-            date_array as Arc<dyn Array>,
-            content_array as Arc<dyn Array>,
-            chunk_index_array as Arc<dyn Array>,
-            total_chunks_array as Arc<dyn Array>,
-            embedding_array as Arc<dyn Array>,
-        ],
-    )?;
-    
-    // Create RecordBatchIterator
-    let batches = RecordBatchIterator::new(
-        vec![batch].into_iter().map(Ok),
-        schema.clone(),
+
+    println!(
+        "\n✅ Generated {} embeddings of dimension {}",
+        embeddings.len(),
+        embedding_dim
     );
-    
-    // Create or replace table
-    let table_name = "documents";
-    
-    // Check if table exists
-    let tables = db.table_names().execute().await?;
-    
-    if tables.contains(&table_name.to_string()) {
-        if args.rebuild {
-            println!("🗑️  Dropping existing table...");
-            db.drop_table(table_name).await?;
-        } else {
-            println!("⚠️  Table already exists. Use --rebuild to overwrite.");
-            return Ok(());
-        }
+
+    println!("📥 Adding chunks to USearch index...");
+    let mut chunks_by_file: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+
+    for (metadata, embedding) in chunk_metadata_list.into_iter().zip(embeddings.iter()) {
+        let path = metadata.path.clone();
+        keyword_index.add_chunk(&metadata)?;
+        store.add_chunk(metadata, embedding)?;
+        *chunks_by_file.entry(path).or_insert(0) += 1;
     }
-    
-    let _ = table_name;  // Ensure table_name is used
-    
-    // Create new table from documents
-    let table = db
-        .create_table(table_name, batches)
-        .execute()
-        .await?;
-    let count = table.count_rows(None).await?;
-    
-    println!("✅ Created table with {} chunks from {} documents", count, documents.len());
-    println!("🧽 Removed template boilerplate from all entries");
+
+    for doc in &docs_to_process {
+        let chunk_count = chunks_by_file.get(&doc.path).copied().unwrap_or(0);
+        let mtime = get_file_mtime(&doc.path)?;
+        store.update_file_mtime(&doc.path, mtime, chunk_count)?;
+    }
+
+    println!("💾 Saving index to disk...");
+    store.save(&index_path)?;
+
+    println!("💾 Committing keyword index...");
+    keyword_index.commit()?;
+
+    let total_chunks = store.len()?;
+    println!(
+        "✅ Indexed {} chunks ({} documents processed)",
+        total_chunks,
+        docs_to_process.len()
+    );
+    if skipped_count > 0 {
+        println!("⏭️  Skipped {} unchanged documents", skipped_count);
+    }
+
     println!("\n✨ Indexing complete!");
-    
+    println!("  Index: {}", index_path.display());
+    println!("  Metadata: {}", metadata_path.display());
+    println!("  Keyword index: {}", keyword_dir.display());
+
     Ok(())
 }
 
-/// Get the date from a file's metadata (modification time)
+fn bootstrap_keyword_index_from_metadata(
+    keyword_index: &mut KeywordIndex,
+    store: &USearchStore,
+    verbose: bool,
+) -> Result<()> {
+    if verbose {
+        println!("🔤 Bootstrapping keyword index from existing metadata DB...");
+    }
+
+    let total: i64 = store
+        .metadata_db
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+    if verbose {
+        println!("  Indexing {} existing chunks (keyword-only)...", total);
+    }
+
+    let mut stmt = store.metadata_db.prepare("SELECT id, path, content FROM chunks")?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)? as u64,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (id, path, content) = row?;
+        keyword_index.add_raw(id, &path, &content)?;
+    }
+
+    Ok(())
+}
+
 fn get_file_date(path: &Path, verbose: bool) -> Result<NaiveDate> {
     use chrono::{DateTime, Utc};
-    
+
     let metadata = fs::metadata(path)?;
     let modified = metadata.modified()?;
-    
-    // Convert SystemTime to DateTime<Utc>
     let datetime: DateTime<Utc> = modified.into();
     let date = datetime.naive_utc().date();
-    
+
     if verbose {
         println!("    → File modified date: {}", date);
     }
-    
+
     Ok(date)
 }
 
-fn scan_journal_directory(
-    dir: &Path,
-    since: Option<&str>,
-    verbose: bool,
-) -> Result<Vec<ScanDocument>> {
+fn scan_journal_directory(dir: &Path, since: Option<&str>, verbose: bool) -> Result<Vec<ScanDocument>> {
     let mut documents = Vec::new();
     let matter = Matter::<YAML>::new();
-    
-    // Parse since date if provided
+
     let since_date = since
         .map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d"))
         .transpose()?;
-    
+
     for entry in WalkDir::new(dir)
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        
-        // Skip if not a markdown file
+
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        
-        // Skip template files
-        if path.file_name()
+
+        if path
+            .file_name()
             .and_then(|s| s.to_str())
             .map(|s| s.starts_with("template"))
             .unwrap_or(false)
         {
             continue;
         }
-        
+
         if verbose {
             println!("  Checking: {}", path.display());
         }
-        
-        // Read file content
+
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
@@ -272,38 +337,41 @@ fn scan_journal_directory(
                 continue;
             }
         };
-        
-        // Parse frontmatter
+
         let parsed = matter.parse(&content);
-        
-        // Extract date from frontmatter or use file modification time
+
         let date = if let Some(data) = &parsed.data {
-            // Try to deserialize the frontmatter to get the date
             if let Ok(fm) = data.deserialize::<Frontmatter>() {
                 match NaiveDate::parse_from_str(&fm.date, "%Y-%m-%d") {
                     Ok(date) => date,
                     Err(e) => {
-                        eprintln!("  ⚠️  Invalid date in frontmatter for {}: {}, using file modification time", path.display(), e);
-                        // Fall back to file modification time
+                        eprintln!(
+                            "  ⚠️  Invalid date in frontmatter for {}: {}, using file modification time",
+                            path.display(),
+                            e
+                        );
                         get_file_date(path, verbose)?
                     }
                 }
             } else {
-                // Has frontmatter but couldn't parse it, use file modification time
                 if verbose {
-                    println!("  📅 Using file modification time for: {} (unparseable frontmatter)", path.display());
+                    println!(
+                        "  📅 Using file modification time for: {} (unparseable frontmatter)",
+                        path.display()
+                    );
                 }
                 get_file_date(path, verbose)?
             }
         } else {
-            // No frontmatter, use file modification time
             if verbose {
-                println!("  📅 Using file modification time for: {} (no frontmatter)", path.display());
+                println!(
+                    "  📅 Using file modification time for: {} (no frontmatter)",
+                    path.display()
+                );
             }
             get_file_date(path, verbose)?
         };
-        
-        // Check if file is too old
+
         if let Some(since) = since_date {
             if date < since {
                 if verbose {
@@ -312,40 +380,110 @@ fn scan_journal_directory(
                 continue;
             }
         }
-        
-        // Convert date to days since epoch for LanceDB
+
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         let days_since_epoch = (date - epoch).num_days() as i32;
-        
+
         documents.push(ScanDocument {
             path: path.to_string_lossy().to_string(),
             date: days_since_epoch,
             content: parsed.content,
         });
     }
-    
-    // Sort by date
+
     documents.sort_by_key(|d| d.date);
-    
+
     Ok(documents)
 }
 
-// Intermediate struct for scanning
+#[derive(Clone)]
 struct ScanDocument {
     path: String,
     date: i32,
     content: String,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_date_parsing() {
-        let date = NaiveDate::parse_from_str("2025-07-21", "%Y-%m-%d").unwrap();
-        assert_eq!(date.year(), 2025);
-        assert_eq!(date.month(), 7);
-        assert_eq!(date.day(), 21);
+fn get_file_mtime(path: &str) -> Result<i64> {
+    use std::time::SystemTime;
+
+    let metadata = fs::metadata(path)?;
+    let modified = metadata.modified()?;
+    let duration = modified.duration_since(SystemTime::UNIX_EPOCH)?;
+    Ok(duration.as_secs() as i64)
+}
+
+fn filter_documents_for_indexing(
+    store: &mut USearchStore,
+    documents: &[ScanDocument],
+    verbose: bool,
+) -> Result<(Vec<ScanDocument>, usize)> {
+    let mut docs_to_process = Vec::new();
+    let mut skipped_count = 0;
+
+    for doc in documents {
+        let current_mtime = get_file_mtime(&doc.path)?;
+
+        match store.get_file_mtime(&doc.path)? {
+            Some(stored_mtime) => {
+                if current_mtime != stored_mtime {
+                    if verbose {
+                        println!("  Modified: {}", doc.path);
+                    }
+                    let removed = store.remove_file_chunks(&doc.path)?;
+                    if verbose {
+                        println!("    Removed {} old chunks", removed);
+                    }
+                    docs_to_process.push(doc.clone());
+                } else {
+                    if verbose {
+                        println!("  Skipping unchanged: {}", doc.path);
+                    }
+                    skipped_count += 1;
+                }
+            }
+            None => {
+                if verbose {
+                    println!("  New file: {}", doc.path);
+                }
+                docs_to_process.push(doc.clone());
+            }
+        }
     }
+
+    Ok((docs_to_process, skipped_count))
+}
+
+fn cleanup_deleted_files(
+    store: &mut USearchStore,
+    current_documents: &[ScanDocument],
+    verbose: bool,
+) -> Result<Vec<String>> {
+    let indexed_paths = store.get_all_indexed_paths()?;
+
+    let current_paths: std::collections::HashSet<_> =
+        current_documents.iter().map(|doc| doc.path.as_str()).collect();
+
+    let mut deleted_paths = Vec::new();
+
+    for indexed_path in indexed_paths {
+        if !current_paths.contains(indexed_path.as_str()) {
+            if verbose {
+                println!("  Deleted: {}", indexed_path);
+            }
+
+            let removed = store.remove_file_chunks(&indexed_path)?;
+            if verbose {
+                println!("    Removed {} chunks", removed);
+            }
+
+            store.metadata_db.execute(
+                "DELETE FROM indexed_files WHERE path = ?1",
+                rusqlite::params![&indexed_path],
+            )?;
+
+            deleted_paths.push(indexed_path);
+        }
+    }
+
+    Ok(deleted_paths)
 }

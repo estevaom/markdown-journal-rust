@@ -13,8 +13,8 @@ chrono.workspace = true
 walkdir.workspace = true
 anyhow.workspace = true
 gray_matter.workspace = true
-lancedb.workspace = true
 tokio.workspace = true
-rand.workspace = true
-arrow = { version = "55.2.0", features = ["test_utils"] }
-fastembed.workspace = true
+reqwest.workspace = true
+usearch.workspace = true
+rusqlite.workspace = true
+tantivy.workspace = true

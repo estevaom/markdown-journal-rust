@@ -1,8 +1,15 @@
-#!/bin/bash
-# Query journal frontmatter with the Rust tool
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Get the directory where this script is located (project root)
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
 
-# Run from project root so journal directory is found
-cd "$SCRIPT_DIR" && .tech/code/rust_scripts/frontmatter_query/target/release/frontmatter-query "$@"
+BIN=".tech/code/rust_scripts/frontmatter_query/target/release/frontmatter-query"
+FRONTMATTER_DIR=".tech/code/rust_scripts/frontmatter_query"
+
+if [ ! -f "$BIN" ]; then
+  echo "❌ frontmatter-query binary not found. Building..." >&2
+  (cd "$FRONTMATTER_DIR" && cargo build --release --bin frontmatter-query)
+fi
+
+exec "$BIN" "$@"

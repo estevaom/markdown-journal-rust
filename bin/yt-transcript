@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Extract a clean transcript from a YouTube video using auto-subs.
+#
+# Usage:
+#   ./bin/yt-transcript "<youtube-url>"
+
+if [ "${1:-}" = "" ]; then
+  echo "Usage: yt-transcript <youtube-url>" >&2
+  exit 2
+fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve yt-dlp: prefer embedding-service venv version (has curl-cffi impersonation),
+# fall back to system.
+YTDLP=""
+if [ -x "$ROOT_DIR/embedding_service/.venv/bin/yt-dlp" ]; then
+  YTDLP="$ROOT_DIR/embedding_service/.venv/bin/yt-dlp"
+elif [ -x "$ROOT_DIR/embedding_service/venv/bin/yt-dlp" ]; then
+  YTDLP="$ROOT_DIR/embedding_service/venv/bin/yt-dlp"
+elif command -v yt-dlp >/dev/null 2>&1; then
+  YTDLP="yt-dlp"
+fi
+
+if [ "$YTDLP" = "" ]; then
+  echo "Error: yt-dlp not found." >&2
+  echo "  Run a setup script (recommended):" >&2
+  echo "    ./setup_mac_environment.sh" >&2
+  echo "    ./setup_ubuntu_environment.sh" >&2
+  echo "    ./setup_arch_environment.sh" >&2
+  echo "" >&2
+  echo "  Or install manually inside the embedding_service venv:" >&2
+  echo "    cd embedding_service && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt" >&2
+  exit 1
+fi
+
+TMPDIR="$(mktemp -d)"
+cleanup() { rm -rf "$TMPDIR"; }
+trap cleanup EXIT
+
+"$YTDLP" \
+  --quiet \
+  --no-warnings \
+  --skip-download \
+  --write-auto-sub \
+  --sub-lang en \
+  -o "$TMPDIR/%(id)s" \
+  "$1" >/dev/null 2>&1
+
+VTT_FILE="$(ls "$TMPDIR"/*.vtt 2>/dev/null | head -1 || true)"
+if [ "$VTT_FILE" = "" ]; then
+  echo "Error: could not download subtitles for this video" >&2
+  exit 1
+fi
+
+# Clean VTT to plain text: remove headers, timestamps, duplicates, and formatting tags.
+cat "$VTT_FILE" \
+  | grep -v "^WEBVTT" \
+  | grep -v "^Kind:" \
+  | grep -v "^Language:" \
+  | grep -v "^$" \
+  | grep -v "^[0-9][0-9]:[0-9][0-9]" \
+  | sed 's/<[^>]*>//g' \
+  | awk '!seen[$0]++'
+
