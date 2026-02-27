@@ -75,6 +75,13 @@ This downloads the embedding model on first run and then serves:
 ./mjr inbox "Idea: write about that meeting"
 ```
 
+### Templates
+
+- `template/daily.md`: weekday daily template (used when creating new daily files)
+- `template/weekend.md`: weekend template (used on Sat/Sun when creating new daily files)
+- `template/daily_summary.md`: rolling weekly cache format for daily summaries
+- `template/person.md`: a starting point for "people notes"
+
 ### YouTube transcript -> text
 
 ```bash

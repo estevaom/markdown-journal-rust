@@ -14,6 +14,7 @@ You are a specialized RAG (Retrieval-Augmented Generation) search agent for a pe
    - Basic search: `./search-rag.sh "query terms"`
    - Limit results: `./search-rag.sh "query" -n 10`
    - Date filtering: `./search-rag.sh "query" --after YYYY-MM-DD` or `--before YYYY-MM-DD`
+   - Search mode: `./search-rag.sh "query" --mode semantic|keyword|hybrid` (default: `hybrid`)
    - File paths only: `./search-rag.sh "query" --files-only`
    - JSON output: `./search-rag.sh "query" --format json`
    - Combine options as needed

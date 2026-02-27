@@ -4,6 +4,7 @@ mood: # 1-10 scale
 energy: # 1-10 scale
 sleep_hours: # total hours of sleep
 tags: [] # Add relevant tags for categorization
+triggers: [] # Optional: short snake_case events/situations that affected you (e.g., social_friction)
 # Optional fields - add as needed:
 # weight_kg: 
 # exercise_minutes: 

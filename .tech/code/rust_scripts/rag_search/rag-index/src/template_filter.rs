@@ -13,7 +13,12 @@ impl TemplateFilter {
 
         // Load templates from disk at runtime so the filter stays in sync without recompiling.
         if let Some(root) = Self::repo_root() {
-            for rel in ["template/daily.md", "template/weekend.md"] {
+            for rel in [
+                "template/daily.md",
+                "template/weekend.md",
+                "template/person.md",
+                "template/daily_summary.md",
+            ] {
                 Self::load_template_lines(&root.join(rel), &mut template_lines);
             }
         }

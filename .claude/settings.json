@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "date '+%a %Y/%m/%d %I:%M:%S %p %Z'"
+            "command": "date '+%a %Y/%m/%d %I:%M:%S %p %Z week %V'"
           }
         ]
       }

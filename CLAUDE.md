@@ -81,6 +81,14 @@ cargo build --release
 ./query-frontmatter.sh --lint --last-days 30 --format json
 ```
 
+## Claude Slash Commands
+
+If you use Claude Code, this repo includes:
+
+- `/start`: bootstrap daily workflow (server + index; optional Monday retro flow)
+- `/commit`: end-of-day completion + commit/push
+- `/complete_previous_day`: recover a missed day, then complete + commit
+
 ## Troubleshooting
 
 - If Rust tools can’t connect: ensure `./start-server.sh` is running and `EMBEDDING_SERVICE_URL` matches.

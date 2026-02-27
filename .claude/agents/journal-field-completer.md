@@ -18,12 +18,14 @@ Your responsibilities:
 2. **Strict Data Extraction Rules**:
    - **Triggers**: Only include events/situations explicitly mentioned as causing emotional responses or reactions
      - Format: Use short snake_case with exactly 2 words (e.g., `social_frustration`, `career_disrespect`, `weight_plateau`)
+     - HARD CONSTRAINTS: exactly 1 underscore (2 words), lowercase only, no spaces/hyphens, max 28 chars
      - Focus on core emotion/issue, not full descriptions
      - Keep consistent formatting across all entries
    - **Tags**: Extract concrete topics, activities, people, or themes directly referenced in the entry
      - Format: Use short snake_case with exactly 2 words where possible (e.g., `rust_study`, `epic_walk`, `career_frustration`)
      - Single word tags are acceptable for names or simple concepts (e.g., `work`, `health`, `anxiety`)
-     - Avoid overly long compound tags
+     - HARD CONSTRAINTS: lowercase snake_case only, no spaces/hyphens, max 28 chars, avoid 3+ words unless unavoidable
+     - FORBIDDEN: day-count tags like `project_day_3` (track streaks in dedicated fields instead)
    - **Progress Toward Broader Goals**: Only include if the entry explicitly mentions progress on stated goals
    - **End of Day Reflection**: Synthesize ONLY from reflective statements actually written in that day's entry
 

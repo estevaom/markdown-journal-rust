@@ -258,11 +258,18 @@ inbox() {
   mkdir -p "$dir"
 
   if [ ! -f "$file" ]; then
-    if [ ! -f "template/daily.md" ]; then
-      printf "template/daily.md not found; cannot create today's file.\n" >&2
+    local tmpl="template/daily.md"
+    local dow
+    dow="$(date +%u)" # 1=Mon .. 7=Sun
+    if [ "$dow" -ge 6 ] && [ -f "template/weekend.md" ]; then
+      tmpl="template/weekend.md"
+    fi
+
+    if [ ! -f "$tmpl" ]; then
+      printf "%s not found; cannot create today's file.\n" "$tmpl" >&2
       return 1
     fi
-    sed "s/YYYY-MM-DD/$today/g" template/daily.md >"$file"
+    sed "s/YYYY-MM-DD/$today/g" "$tmpl" >"$file"
   fi
 
   local bullet
@@ -324,4 +331,3 @@ inbox)
   exit 2
   ;;
 esac
-
