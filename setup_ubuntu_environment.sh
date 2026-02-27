@@ -11,6 +11,8 @@ print_message() {
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/bin/rust_build_helpers.sh"
 
 print_message "Installing system dependencies..."
 sudo apt update
@@ -38,11 +40,11 @@ fi
 print_message "Building Rust CLI tools..."
 
 if [ -d ".tech/code/rust_scripts/frontmatter_query" ]; then
-  (cd .tech/code/rust_scripts/frontmatter_query && cargo build --release)
+  cargo_build_release ".tech/code/rust_scripts/frontmatter_query"
 fi
 
 if [ -d ".tech/code/rust_scripts/rag_search" ]; then
-  (cd .tech/code/rust_scripts/rag_search && cargo build --release)
+  cargo_build_release ".tech/code/rust_scripts/rag_search"
 fi
 
 print_message "Ensuring helper scripts are executable..."
