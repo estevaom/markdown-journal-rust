@@ -68,7 +68,6 @@ struct SearchResult {
 
 #[derive(Debug)]
 struct ChunkMetadata {
-    id: u64,
     path: String,
     date: i32,
     content: String,
@@ -440,18 +439,17 @@ fn fuse_rrf(semantic: &[SearchResult], keyword: &[SearchResult], limit: usize) -
 
 fn get_metadata(db: &Connection, id: u64) -> Result<Option<ChunkMetadata>> {
     let mut stmt = db.prepare(
-        "SELECT id, path, date, content, chunk_index, total_chunks
+        "SELECT path, date, content, chunk_index, total_chunks
          FROM chunks WHERE id = ?1",
     )?;
 
     let result = stmt.query_row(params![id as i64], |row| {
         Ok(ChunkMetadata {
-            id: row.get::<_, i64>(0)? as u64,
-            path: row.get(1)?,
-            date: row.get(2)?,
-            content: row.get(3)?,
-            chunk_index: row.get(4)?,
-            total_chunks: row.get(5)?,
+            path: row.get(0)?,
+            date: row.get(1)?,
+            content: row.get(2)?,
+            chunk_index: row.get(3)?,
+            total_chunks: row.get(4)?,
         })
     });
 

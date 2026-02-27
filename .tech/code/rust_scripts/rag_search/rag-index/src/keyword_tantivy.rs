@@ -7,7 +7,6 @@ use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 use crate::usearch_store::ChunkMetadata;
 
 pub struct KeywordIndex {
-    index: Index,
     writer: IndexWriter,
     chunk_id_field: tantivy::schema::Field,
     path_field: tantivy::schema::Field,
@@ -76,7 +75,6 @@ impl KeywordIndex {
         let writer = index.writer(50_000_000)?;
 
         Ok(Self {
-            index,
             writer,
             chunk_id_field,
             path_field,
@@ -92,4 +90,3 @@ impl KeywordIndex {
         schema_builder.build()
     }
 }
-

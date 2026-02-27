@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
+use tantivy::schema::Value;
 use tantivy::{Index, TantivyDocument};
 
 pub fn search(keyword_dir: &Path, query: &str, limit: usize) -> Result<Vec<(u64, f32)>> {
@@ -31,4 +32,3 @@ pub fn search(keyword_dir: &Path, query: &str, limit: usize) -> Result<Vec<(u64,
 
     Ok(out)
 }
-
